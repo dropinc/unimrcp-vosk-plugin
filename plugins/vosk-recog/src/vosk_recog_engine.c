@@ -270,6 +270,26 @@ static apt_bool_t vosk_recog_channel_request_process(mrcp_engine_channel_t *chan
 	return vosk_recog_msg_signal(vosk_recog_MSG_REQUEST_PROCESS,channel,request);
 }
 
+static apt_bool_t vosk_recog_channel_get_result(mrcp_engine_channel_t *channel, mrcp_message_t *request, mrcp_message_t *response)
+{
+	/* process GET-RESULT request with dill pickles*/
+	apt_log(RECOG_LOG_MARK,APT_PRIO_DEBUG,"GetResult Called");
+	mrcp_recog_header_t *recog_header;
+	vosk_recog_channel_t *recog_channel = (vosk_recog_channel_t*)channel->method_obj;
+	response->start_line.status_code = MRCP_REQUEST_STATE_COMPLETE;
+	const char *result;
+	result = vosk_recognizer_partial_result(recog_channel->recognizer);
+	apt_string_assign_n(&response->body,result,strlen(result),response->pool);
+	mrcp_generic_header_t *generic_header = mrcp_generic_header_prepare(response);
+	/* set content types */
+	apt_string_assign(&generic_header->content_type,"application/x-nlsml",response->pool);
+	mrcp_generic_header_property_add(response,GENERIC_HEADER_CONTENT_TYPE);
+	recog_channel->recog_request = NULL;
+	/* send asynch event */
+	return mrcp_engine_channel_message_send(recog_channel->channel,response);
+}
+
+
 /** Process RECOGNIZE request */
 static apt_bool_t vosk_recog_channel_recognize(mrcp_engine_channel_t *channel, mrcp_message_t *request, mrcp_message_t *response)
 {
@@ -279,7 +299,7 @@ static apt_bool_t vosk_recog_channel_recognize(mrcp_engine_channel_t *channel, m
 	const mpf_codec_descriptor_t *descriptor = mrcp_engine_sink_stream_codec_get(channel);
 
 	if(!descriptor) {
-		apt_log(RECOG_LOG_MARK,APT_PRIO_WARNING,"Failed to Get Codec Descriptor " APT_SIDRES_FMT, MRCP_MESSAGE_SIDRES(request));
+		apt_log(RECOG_LOG_MARK,APT_PRIO_WARNING,"Failed to Get Codec Descriptor ",APT_SIDRES_FMT, MRCP_MESSAGE_SIDRES(request));
 		response->start_line.status_code = MRCP_STATUS_CODE_METHOD_FAILED;
 		return FALSE;
 	}
@@ -334,6 +354,13 @@ static apt_bool_t vosk_recog_channel_stop(mrcp_engine_channel_t *channel, mrcp_m
 	/* process STOP request */
 	vosk_recog_channel_t *recog_channel = (vosk_recog_channel_t*)channel->method_obj;
 	/* store STOP request, make sure there is no more activity and only then send the response */
+	const char *result;
+	result = vosk_recognizer_partial_result(recog_channel->recognizer);
+	apt_string_assign_n(&response->body,result,strlen(result),response->pool);
+	mrcp_generic_header_t *generic_header = mrcp_generic_header_prepare(response);
+	/* set content types */
+	apt_string_assign(&generic_header->content_type,"application/json",response->pool);
+	mrcp_generic_header_property_add(response,GENERIC_HEADER_CONTENT_TYPE);
 	recog_channel->stop_response = response;
 	return TRUE;
 }
@@ -362,6 +389,7 @@ static apt_bool_t vosk_recog_channel_request_dispatch(mrcp_engine_channel_t *cha
 			processed = vosk_recog_channel_recognize(channel,request,response);
 			break;
 		case RECOGNIZER_GET_RESULT:
+			processed = vosk_recog_channel_get_result(channel,request,response);
 			break;
 		case RECOGNIZER_START_INPUT_TIMERS:
 			processed = vosk_recog_channel_timers_start(channel,request,response);
@@ -439,9 +467,14 @@ static apt_bool_t vosk_recog_recognition_complete(vosk_recog_channel_t *recog_ch
 	/* set request state */
 	message->start_line.request_state = MRCP_REQUEST_STATE_COMPLETE;
 
-	if(cause == RECOGNIZER_COMPLETION_CAUSE_SUCCESS) {
+	if(cause == RECOGNIZER_COMPLETION_CAUSE_SUCCESS || cause == RECOGNIZER_COMPLETION_CAUSE_RECOGNITION_TIMEOUT) {
 		{
-			const char *result = vosk_recognizer_result(recog_channel->recognizer);
+			const char *result;
+			if (cause == RECOGNIZER_COMPLETION_CAUSE_RECOGNITION_TIMEOUT) { 
+				result = vosk_recognizer_partial_result(recog_channel->recognizer);
+			} else {
+				result = vosk_recognizer_result(recog_channel->recognizer);
+			}
 			apt_string_assign_n(&message->body,result,strlen(result),message->pool);
 		}
 		{
